@@ -10,17 +10,28 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 TOKEN_TELEGRAM = os.getenv("TOKEN_TELEGRAM")
 TOKEN_SPTRANS = os.getenv("TOKEN_SPTRANS")
 
+if not TOKEN_TELEGRAM:
+    raise ValueError("TOKEN_TELEGRAM não configurado no Railway")
 
+if not TOKEN_SPTRANS:
+    raise ValueError("TOKEN_SPTRANS não configurado no Railway")
+
+
+# =========================
+# FUNÇÕES SPTRANS
+# =========================
 def autenticar(session):
     r = session.post(
-        f"https://api.olhovivo.sptrans.com.br/v2.1/Login/Autenticar?token={TOKEN_SPTRANS}"
+        f"https://api.olhovivo.sptrans.com.br/v2.1/Login/Autenticar?token={TOKEN_SPTRANS}",
+        timeout=10
     )
     return "true" in r.text.lower()
 
 
 def buscar_paradas_barra_funda(session):
     r = session.get(
-        "https://api.olhovivo.sptrans.com.br/v2.1/Parada/Buscar?termosBusca=barra funda"
+        "https://api.olhovivo.sptrans.com.br/v2.1/Parada/Buscar?termosBusca=barra funda",
+        timeout=10
     )
     r.raise_for_status()
     return r.json()
@@ -28,7 +39,8 @@ def buscar_paradas_barra_funda(session):
 
 def buscar_previsao(session, parada):
     r = session.get(
-        f"https://api.olhovivo.sptrans.com.br/v2.1/Previsao?codigoParada={parada}"
+        f"https://api.olhovivo.sptrans.com.br/v2.1/Previsao?codigoParada={parada}",
+        timeout=10
     )
     r.raise_for_status()
     return r.json()
@@ -37,10 +49,7 @@ def buscar_previsao(session, parada):
 def extrair_opcoes(data, chegada):
     encontrados = []
 
-    try:
-        linhas = data["p"]["l"]
-    except Exception:
-        return encontrados
+    linhas = data.get("p", {}).get("l", [])
 
     for linha in linhas:
         nome_linha = linha.get("c", "") or ""
@@ -53,31 +62,42 @@ def extrair_opcoes(data, chegada):
                 if not horario:
                     continue
 
-                hora_bus = datetime.strptime(horario, "%H:%M").replace(
-                    year=chegada.year,
-                    month=chegada.month,
-                    day=chegada.day,
-                    second=0,
-                    microsecond=0,
-                )
+                try:
+                    hora_bus = datetime.strptime(horario, "%H:%M").replace(
+                        year=chegada.year,
+                        month=chegada.month,
+                        day=chegada.day,
+                        second=0,
+                        microsecond=0,
+                    )
 
-                diff = int((hora_bus - chegada).total_seconds() / 60)
+                    # Ajuste pra não dar negativo quando passa da meia-noite
+                    if hora_bus < chegada:
+                        hora_bus += timedelta(days=1)
 
-                encontrados.append({
-                    "linha": identificador,
-                    "horario": horario,
-                    "espera": diff,
-                })
+                    diff = int((hora_bus - chegada).total_seconds() / 60)
+
+                    encontrados.append({
+                        "linha": identificador,
+                        "horario": horario,
+                        "espera": diff,
+                    })
+
+                except Exception:
+                    continue
 
     return encontrados
 
 
+# =========================
+# HANDLER
+# =========================
 async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         session = requests.Session()
 
         if not autenticar(session):
-            await update.message.reply_text("Erro ao autenticar na SPTrans.")
+            await update.message.reply_text("Erro ao autenticar na SPTrans 😢")
             return
 
         paradas = buscar_paradas_barra_funda(session)
@@ -97,7 +117,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not encontrados:
             await update.message.reply_text(
-                "Não encontrei 179X ou 9191 nessa parada agora."
+                "Não encontrei 179X ou 9191 agora 😢"
             )
             return
 
@@ -110,17 +130,30 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🚌 Melhor opção:\n"
             f"{melhor['linha']}\n"
             f"⏱ Sai: {melhor['horario']}\n"
-            f"⌛ Espera: {melhor['espera']} min"
+            f"⌛ Espera: {melhor['espera']} min\n\n"
+            f"📊 Outras opções:\n"
         )
+
+        for e in encontrados[:3]:
+            resposta += f"- {e['linha']} às {e['horario']} ({e['espera']} min)\n"
 
         await update.message.reply_text(resposta)
 
     except Exception as e:
-        await update.message.reply_text(f"Erro: {str(e)}")
+        await update.message.reply_text(f"Erro interno: {str(e)}")
 
 
-app = ApplicationBuilder().token(TOKEN_TELEGRAM).build()
+# =========================
+# START DO BOT
+# =========================
+def main():
+    app = ApplicationBuilder().token(TOKEN_TELEGRAM).build()
 
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
 
-app.run_polling()
+    print("Bot rodando... 🚀")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
